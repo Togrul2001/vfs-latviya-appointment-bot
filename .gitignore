@@ -1,0 +1,25 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node
+dashboard/server/node_modules/
+dashboard/frontend/node_modules/
+dashboard/frontend/dist/
+
+# Botun canlı işlədiyi data faylları (server üzərində daim dəyişir, koda aid deyil)
+accounts.xlsx
+applicants.xlsx
+proxy.xlsx
+dolmus_saatlar.txt
+ziyaret_sessiyasi.json
+cookies/
+dashboard/server/telegram_link.json
+bot_settings.json
+
+# Latviya botu Selenium/undetected_chromedriver profili işlədir — repo-ya girməsin
+bot_profile_*/
+
+.claude/
