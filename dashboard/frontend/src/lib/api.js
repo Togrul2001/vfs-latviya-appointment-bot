@@ -42,14 +42,14 @@ export const getApplicants = () => request("/applicants");
 export const addApplicant = (applicant) =>
   request("/applicants", { method: "POST", body: JSON.stringify(applicant) });
 
-export const updateApplicant = (passport, updates) =>
-  request(`/applicants/${encodeURIComponent(passport)}`, {
+export const updateApplicant = (mail, updates) =>
+  request(`/applicants/${encodeURIComponent(mail)}`, {
     method: "PATCH",
     body: JSON.stringify(updates),
   });
 
-export const deleteApplicant = (passport) =>
-  request(`/applicants/${encodeURIComponent(passport)}`, { method: "DELETE" });
+export const deleteApplicant = (mail) =>
+  request(`/applicants/${encodeURIComponent(mail)}`, { method: "DELETE" });
 
 export async function uploadApplicants(file) {
   const formData = new FormData();

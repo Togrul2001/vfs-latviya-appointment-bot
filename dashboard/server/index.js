@@ -194,18 +194,18 @@ app.post("/api/applicants", requireAuth, async (req, res) => {
   }
 });
 
-app.patch("/api/applicants/:passport", requireAuth, async (req, res) => {
+app.patch("/api/applicants/:mail", requireAuth, async (req, res) => {
   try {
-    await updateApplicant(BASE_DIR, req.params.passport, req.body || {});
+    await updateApplicant(BASE_DIR, req.params.mail, req.body || {});
     res.json({ ok: true });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
 });
 
-app.delete("/api/applicants/:passport", requireAuth, async (req, res) => {
+app.delete("/api/applicants/:mail", requireAuth, async (req, res) => {
   try {
-    await deleteApplicant(BASE_DIR, req.params.passport);
+    await deleteApplicant(BASE_DIR, req.params.mail);
     res.json({ ok: true });
   } catch (err) {
     res.status(400).json({ error: err.message });

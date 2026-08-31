@@ -29,16 +29,11 @@ export default function AddApplicantModal({ onClose, onAdd }) {
   const [qrupId, setQrupId] = useState("1");
   const [ad, setAd] = useState("");
   const [soyad, setSoyad] = useState("");
-  const [cinsiyyet, setCinsiyyet] = useState("Male");
-  const [vetendasliq, setVetendasliq] = useState("AZERBAIJAN");
-  const [dogumTarixi, setDogumTarixi] = useState("");
-  const [pasportNomresi, setPasportNomresi] = useState("");
-  const [pasportBitme, setPasportBitme] = useState("");
-  const [olkeKodu, setOlkeKodu] = useState("994");
+  const [mail, setMail] = useState("");
   const [telefon, setTelefon] = useState("");
   const [tarixBaslangic, setTarixBaslangic] = useState("");
   const [tarixBitis, setTarixBitis] = useState("");
-  const [saatAraligi, setSaatAraligi] = useState("");
+  const [vizaNovu, setVizaNovu] = useState("1");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
 
@@ -51,16 +46,11 @@ export default function AddApplicantModal({ onClose, onAdd }) {
         qrupId,
         ad,
         soyad,
-        cinsiyyet,
-        vetendasliq,
-        dogumTarixi: dmyToIso(dogumTarixi),
-        pasportNomresi,
-        pasportBitme: dmyToIso(pasportBitme),
-        olkeKodu,
+        mail,
         telefon,
         tarixBaslangic: dmyToIso(tarixBaslangic),
         tarixBitis: dmyToIso(tarixBitis),
-        saatAraligi,
+        vizaNovu,
       });
       onClose();
     } catch (err) {
@@ -89,68 +79,36 @@ export default function AddApplicantModal({ onClose, onAdd }) {
             <input value={qrupId} onChange={(e) => setQrupId(e.target.value)} required className={inputClass} />
           </div>
           <div>
-            <label className={labelClass}>Cinsiyyət</label>
-            <select value={cinsiyyet} onChange={(e) => setCinsiyyet(e.target.value)} className={inputClass}>
-              <option value="Male">Male</option>
-              <option value="Female">Female</option>
+            <label className={labelClass}>Viza Növü</label>
+            <select value={vizaNovu} onChange={(e) => setVizaNovu(e.target.value)} className={inputClass}>
+              <option value="1">Schengen vizası</option>
+              <option value="2">Latviya milli vizası</option>
             </select>
           </div>
         </div>
 
-        <label className={labelClass}>Ad</label>
-        <input value={ad} onChange={(e) => setAd(e.target.value)} required className={inputClass} />
-
-        <label className={labelClass}>Soyad</label>
-        <input value={soyad} onChange={(e) => setSoyad(e.target.value)} className={inputClass} />
-
-        <label className={labelClass}>Vətəndaşlıq</label>
-        <input value={vetendasliq} onChange={(e) => setVetendasliq(e.target.value)} className={inputClass} />
-
         <div className="grid grid-cols-2 gap-x-3">
           <div>
-            <label className={labelClass}>Doğum Tarixi</label>
-            <input
-              type="text"
-              inputMode="numeric"
-              placeholder="GG/AA/İİİİ"
-              maxLength={10}
-              value={dogumTarixi}
-              onChange={(e) => setDogumTarixi(formatDateTyping(e.target.value))}
-              className={inputClass}
-            />
+            <label className={labelClass}>Ad</label>
+            <input value={ad} onChange={(e) => setAd(e.target.value)} required className={inputClass} />
           </div>
           <div>
-            <label className={labelClass}>Pasport Bitmə</label>
-            <input
-              type="text"
-              inputMode="numeric"
-              placeholder="GG/AA/İİİİ"
-              maxLength={10}
-              value={pasportBitme}
-              onChange={(e) => setPasportBitme(formatDateTyping(e.target.value))}
-              className={inputClass}
-            />
+            <label className={labelClass}>Soyad</label>
+            <input value={soyad} onChange={(e) => setSoyad(e.target.value)} className={inputClass} />
           </div>
         </div>
 
-        <label className={labelClass}>Pasport №</label>
+        <label className={labelClass}>Mail</label>
         <input
-          value={pasportNomresi}
-          onChange={(e) => setPasportNomresi(e.target.value)}
+          type="email"
+          value={mail}
+          onChange={(e) => setMail(e.target.value)}
           required
           className={inputClass}
         />
 
-        <div className="grid grid-cols-2 gap-x-3">
-          <div>
-            <label className={labelClass}>Ölkə Kodu</label>
-            <input value={olkeKodu} onChange={(e) => setOlkeKodu(e.target.value)} className={inputClass} />
-          </div>
-          <div>
-            <label className={labelClass}>Telefon</label>
-            <input value={telefon} onChange={(e) => setTelefon(e.target.value)} className={inputClass} />
-          </div>
-        </div>
+        <label className={labelClass}>Telefon</label>
+        <input value={telefon} onChange={(e) => setTelefon(e.target.value)} className={inputClass} />
 
         <div className="grid grid-cols-2 gap-x-3">
           <div>
@@ -178,14 +136,6 @@ export default function AddApplicantModal({ onClose, onAdd }) {
             />
           </div>
         </div>
-
-        <label className={labelClass}>Saat Aralığı</label>
-        <input
-          value={saatAraligi}
-          onChange={(e) => setSaatAraligi(e.target.value)}
-          placeholder="09:00-17:00"
-          className={inputClass}
-        />
 
         {error && <p className="mb-3 text-sm text-red-400">{error}</p>}
 

@@ -19,6 +19,10 @@ const ACCENTS = {
 
 const STATUS_OPTIONS = ["", "Gözləyir", "Yer götürüldü", "Görüşü var"];
 const GROUP_OPTIONS = Array.from({ length: 50 }, (_, i) => String(i + 1));
+const VIZA_OPTIONS = [
+  { value: "1", label: "Schengen vizası" },
+  { value: "2", label: "Latviya milli vizası" },
+];
 
 function statusBadgeClass(a) {
   const s = a.status.trim().toLowerCase();
@@ -37,19 +41,18 @@ export default function Applicants() {
   const [actionError, setActionError] = useState("");
   const [uploading, setUploading] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
-  const [editingKey, setEditingKey] = useState(null); // redaktə olunan sətrin KÖHNƏ pasportu
+  const [editingKey, setEditingKey] = useState(null); // redaktə olunan sətrin KÖHNƏ maili
   const [editData, setEditData] = useState({});
   const [savingEdit, setSavingEdit] = useState(false);
   const fileInputRef = useRef(null);
 
   const EDIT_FIELDS = [
-    "qrupId", "ad", "soyad", "cinsiyyet", "vetendasliq", "dogumTarixi",
-    "pasportNomresi", "pasportBitme", "olkeKodu", "telefon",
-    "tarixBaslangic", "tarixBitis", "saatAraligi", "status",
+    "qrupId", "ad", "soyad", "mail", "telefon",
+    "tarixBaslangic", "tarixBitis", "vizaNovu", "status",
   ];
 
   function startEdit(a) {
-    setEditingKey(a.pasportNomresi);
+    setEditingKey(a.mail);
     const data = {};
     for (const f of EDIT_FIELDS) data[f] = a[f] ?? "";
     setEditData(data);
@@ -91,9 +94,9 @@ export default function Applicants() {
     load();
   }, [load]);
 
-  async function handleChange(passport, updates) {
+  async function handleChange(mail, updates) {
     try {
-      await updateApplicant(passport, updates);
+      await updateApplicant(mail, updates);
       await load();
     } catch (err) {
       setActionError(err.message);
@@ -123,10 +126,10 @@ export default function Applicants() {
     await load();
   }
 
-  async function handleDelete(passport) {
-    if (!window.confirm(`${passport} silinsin? Excel-dəki sətir də silinəcək.`)) return;
+  async function handleDelete(mail) {
+    if (!window.confirm(`${mail} silinsin? Excel-dəki sətir də silinəcək.`)) return;
     try {
-      await deleteApplicant(passport);
+      await deleteApplicant(mail);
       await load();
     } catch (err) {
       setActionError(err.message);
@@ -231,32 +234,27 @@ export default function Applicants() {
                       <th className="sticky top-0 z-10 bg-[#1c202b] px-5 py-2 font-normal">Qrup ID</th>
                       <th className="sticky top-0 z-10 bg-[#1c202b] px-5 py-2 font-normal">Ad</th>
                       <th className="sticky top-0 z-10 bg-[#1c202b] px-5 py-2 font-normal">Soyad</th>
-                      <th className="sticky top-0 z-10 bg-[#1c202b] px-5 py-2 font-normal">Cinsiyyət</th>
-                      <th className="sticky top-0 z-10 bg-[#1c202b] px-5 py-2 font-normal">Vətəndaşlıq</th>
-                      <th className="sticky top-0 z-10 bg-[#1c202b] px-5 py-2 font-normal">Doğum Tarixi</th>
-                      <th className="sticky top-0 z-10 bg-[#1c202b] px-5 py-2 font-normal">Pasport №</th>
-                      <th className="sticky top-0 z-10 bg-[#1c202b] px-5 py-2 font-normal">Pasport Bitmə</th>
-                      <th className="sticky top-0 z-10 bg-[#1c202b] px-5 py-2 font-normal">Ölkə Kodu</th>
+                      <th className="sticky top-0 z-10 bg-[#1c202b] px-5 py-2 font-normal">Mail</th>
                       <th className="sticky top-0 z-10 bg-[#1c202b] px-5 py-2 font-normal">Telefon</th>
                       <th className="sticky top-0 z-10 bg-[#1c202b] px-5 py-2 font-normal">Başlama Tarixi</th>
                       <th className="sticky top-0 z-10 bg-[#1c202b] px-5 py-2 font-normal">Bitmə Tarixi</th>
-                      <th className="sticky top-0 z-10 bg-[#1c202b] px-5 py-2 font-normal">Saat Aralığı</th>
+                      <th className="sticky top-0 z-10 bg-[#1c202b] px-5 py-2 font-normal">Viza Növü</th>
                       <th className="sticky top-0 z-10 bg-[#1c202b] px-5 py-2 font-normal">Status</th>
                       <th className="sticky top-0 z-10 bg-[#1c202b] px-5 py-2 font-normal">Əməliyyatlar</th>
                     </tr>
                   </thead>
                   <tbody>
                     {filtered.map((a) => {
-                      const isEditing = editingKey === a.pasportNomresi;
+                      const isEditing = editingKey === a.mail;
                       return (
-                      <tr key={a.pasportNomresi} className="border-t border-white/5 text-gray-300">
+                      <tr key={a.mail} className="border-t border-white/5 text-gray-300">
                         <td className="px-5 py-2">
                           {isEditing ? (
                             editCell("qrupId", "3.5rem")
                           ) : (
                           <select
                             value={a.qrupId}
-                            onChange={(e) => handleChange(a.pasportNomresi, { qrupId: e.target.value })}
+                            onChange={(e) => handleChange(a.mail, { qrupId: e.target.value })}
                             className="w-16 cursor-pointer truncate rounded border-0 bg-white/5 px-2 py-0.5 text-xs"
                           >
                             {!GROUP_OPTIONS.includes(a.qrupId) && (
@@ -279,22 +277,7 @@ export default function Applicants() {
                           {isEditing ? editCell("soyad") : <TruncateCell value={a.soyad} maxWidth="6rem" />}
                         </td>
                         <td className="px-5 py-2 text-gray-500">
-                          {isEditing ? editCell("cinsiyyet", "5rem") : <TruncateCell value={a.cinsiyyet} maxWidth="5rem" />}
-                        </td>
-                        <td className="px-5 py-2 text-gray-500">
-                          {isEditing ? editCell("vetendasliq", "7rem") : <TruncateCell value={a.vetendasliq} maxWidth="7rem" />}
-                        </td>
-                        <td className="px-5 py-2 text-gray-500">
-                          {isEditing ? editCell("dogumTarixi") : <TruncateCell value={a.dogumTarixi} maxWidth="6rem" />}
-                        </td>
-                        <td className="px-5 py-2 text-gray-500">
-                          {isEditing ? editCell("pasportNomresi") : <TruncateCell value={a.pasportNomresi} maxWidth="6rem" />}
-                        </td>
-                        <td className="px-5 py-2 text-gray-500">
-                          {isEditing ? editCell("pasportBitme") : <TruncateCell value={a.pasportBitme} maxWidth="6rem" />}
-                        </td>
-                        <td className="px-5 py-2 text-gray-500">
-                          {isEditing ? editCell("olkeKodu", "5rem") : <TruncateCell value={a.olkeKodu} maxWidth="5rem" />}
+                          {isEditing ? editCell("mail", "9rem") : <TruncateCell value={a.mail} maxWidth="9rem" />}
                         </td>
                         <td className="px-5 py-2 text-gray-500">
                           {isEditing ? editCell("telefon") : <TruncateCell value={a.telefon} maxWidth="6rem" />}
@@ -305,8 +288,42 @@ export default function Applicants() {
                         <td className="px-5 py-2 text-gray-500">
                           {isEditing ? editCell("tarixBitis") : <TruncateCell value={a.tarixBitis} maxWidth="6rem" />}
                         </td>
-                        <td className="px-5 py-2 text-gray-500">
-                          {isEditing ? editCell("saatAraligi") : <TruncateCell value={a.saatAraligi} maxWidth="6rem" />}
+                        <td className="px-5 py-2">
+                          {isEditing ? (
+                            <select
+                              value={editData.vizaNovu ?? ""}
+                              onChange={(e) => setEditData((d) => ({ ...d, vizaNovu: e.target.value }))}
+                              className="w-32 cursor-pointer truncate rounded border-0 bg-white/10 px-2 py-0.5 text-xs text-gray-100 outline-none focus:ring-1 focus:ring-violet-500"
+                            >
+                              {!VIZA_OPTIONS.some((v) => v.value === (editData.vizaNovu ?? "")) && (
+                                <option value={editData.vizaNovu ?? ""} className="bg-[#161922] text-gray-200">
+                                  {editData.vizaNovu || "—"}
+                                </option>
+                              )}
+                              {VIZA_OPTIONS.map((v) => (
+                                <option key={v.value} value={v.value} className="bg-[#161922] text-gray-200">
+                                  {v.label}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                          <select
+                            value={a.vizaNovu}
+                            onChange={(e) => handleChange(a.mail, { vizaNovu: e.target.value })}
+                            className="w-32 cursor-pointer truncate rounded border-0 bg-white/5 px-2 py-0.5 text-xs"
+                          >
+                            {!VIZA_OPTIONS.some((v) => v.value === a.vizaNovu) && (
+                              <option value={a.vizaNovu} className="bg-[#161922] text-gray-200">
+                                {a.vizaNovu || "—"}
+                              </option>
+                            )}
+                            {VIZA_OPTIONS.map((v) => (
+                              <option key={v.value} value={v.value} className="bg-[#161922] text-gray-200">
+                                {v.label}
+                              </option>
+                            ))}
+                          </select>
+                          )}
                         </td>
                         <td className="px-5 py-2">
                           {isEditing ? (
@@ -314,7 +331,7 @@ export default function Applicants() {
                           ) : (
                           <select
                             value={a.status}
-                            onChange={(e) => handleChange(a.pasportNomresi, { status: e.target.value })}
+                            onChange={(e) => handleChange(a.mail, { status: e.target.value })}
                             className={`w-28 cursor-pointer truncate rounded border-0 px-2 py-0.5 text-xs ${statusBadgeClass(a)}`}
                           >
                             {!STATUS_OPTIONS.includes(a.status) && (
@@ -360,7 +377,7 @@ export default function Applicants() {
                                 <FiEdit2 />
                               </button>
                               <button
-                                onClick={() => handleDelete(a.pasportNomresi)}
+                                onClick={() => handleDelete(a.mail)}
                                 title="Sil"
                                 className="cursor-pointer text-red-400 hover:text-red-300"
                               >

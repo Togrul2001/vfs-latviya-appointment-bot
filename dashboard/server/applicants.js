@@ -6,12 +6,13 @@ import ExcelJS from "exceljs";
 import { findRowByColumn, getHeaderMap, normalizeHeader, readSheetAsObjects, saveWorkbookAtomic } from "./excel.js";
 
 export const APPLICANTS_FILENAME = "applicants.xlsx";
-// Mövcud applicants.xlsx-də dogum_tarixi/pasport_bitme bu formatda saxlanılır (native Excel
-// tarixi kimi) — yeni sətir əlavə edərkən eyni formatı istifadə edirik ki, bot6.py (pandas)
-// bunları da pd.Timestamp kimi oxusun, sadə mətn kimi yox.
+// Latviya applicants.xlsx-də tarix_baslangic/tarix_bitis native Excel tarixi kimi saxlanılır —
+// yeni sətir əlavə edərkən eyni formatı istifadə edirik ki, bot6.py (pandas) bunları
+// pd.Timestamp kimi oxusun, sadə mətn kimi yox.
 const DATE_NUMFMT = "yyyy-mm-dd hh:mm:ss";
 
-// Bot bu statusları "gözləyən, hələ skan edilməli" kimi qəbul edir (boş xana da daxil)
+// Bot bu statusları "gözləyən, hələ skan edilməli" kimi qəbul edir (boş xana da daxil).
+// Bot iş bitəndə status = 1 yazır, ona görə "1" pending deyil.
 const PENDING_STATUSES = ["", "gozleyir", "gözləyir", "nan", "none"];
 
 export function applicantsFilePath(baseDir) {
@@ -38,22 +39,17 @@ export async function readApplicants(baseDir) {
   const applicants = rows
     .filter((r) => String(r.ad || "").trim() || String(r.soyad || "").trim())
     .map((r) => {
-      const status = String(r.status || "").trim();
+      const status = String(r.status ?? "").trim();
       const isPending = PENDING_STATUSES.includes(status.toLowerCase());
       return {
         qrupId: String(r.qrup_id ?? "").trim(),
         ad: String(r.ad || "").trim(),
         soyad: String(r.soyad || "").trim(),
-        cinsiyyet: String(r.cinsiyyet || "").trim(),
-        vetendasliq: String(r.vetendasliq || "").trim(),
-        dogumTarixi: String(r.dogum_tarixi || "").trim(),
-        pasportNomresi: String(r.pasport_nomresi || "").trim(),
-        pasportBitme: String(r.pasport_bitme || "").trim(),
-        olkeKodu: String(r.olke_kodu || "").trim(),
-        telefon: String(r.telefon || "").trim(),
+        mail: String(r.mail || "").trim(),
+        telefon: String(r.telefon ?? "").trim(),
         tarixBaslangic: String(r.tarix_baslangic || "").trim(),
         tarixBitis: String(r.tarix_bitis || "").trim(),
-        saatAraligi: String(r.saat_araligi || "").trim(),
+        vizaNovu: String(r.viza_novu ?? "").trim(),
         status,
         isPending,
       };
@@ -82,31 +78,26 @@ function parseFlexibleDate(value) {
   return null;
 }
 
-// pasport_nomresi (KÖHNƏ) ilə ərizəçini tapıb göndərilmiş bütün sahələri yeniləyir.
+// mail (KÖHNƏ) ilə ərizəçini tapıb göndərilmiş bütün sahələri yeniləyir.
 // Yalnız `updates`-də olan açarlar dəyişir — qalan xanalara toxunulmur.
-export async function updateApplicant(baseDir, passportNo, updates = {}) {
+export async function updateApplicant(baseDir, mail, updates = {}) {
   const filePath = applicantsFilePath(baseDir);
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.readFile(filePath);
   const sheet = workbook.worksheets[0];
   const headers = getHeaderMap(sheet);
-  const row = findRowByColumn(sheet, headers, "pasport_nomresi", passportNo);
+  const row = findRowByColumn(sheet, headers, "mail", mail);
 
   const textMap = {
     qrupId: "qrup_id",
     ad: "ad",
     soyad: "soyad",
-    cinsiyyet: "cinsiyyet",
-    vetendasliq: "vetendasliq",
-    pasportNomresi: "pasport_nomresi",
-    olkeKodu: "olke_kodu",
+    mail: "mail",
     telefon: "telefon",
-    saatAraligi: "saat_araligi",
+    vizaNovu: "viza_novu",
     status: "status",
   };
   const dateMap = {
-    dogumTarixi: "dogum_tarixi",
-    pasportBitme: "pasport_bitme",
     tarixBaslangic: "tarix_baslangic",
     tarixBitis: "tarix_bitis",
   };
@@ -131,13 +122,13 @@ export async function updateApplicant(baseDir, passportNo, updates = {}) {
   await saveWorkbookAtomic(workbook, filePath);
 }
 
-export async function deleteApplicant(baseDir, passportNo) {
+export async function deleteApplicant(baseDir, mail) {
   const filePath = applicantsFilePath(baseDir);
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.readFile(filePath);
   const sheet = workbook.worksheets[0];
   const headers = getHeaderMap(sheet);
-  const row = findRowByColumn(sheet, headers, "pasport_nomresi", passportNo);
+  const row = findRowByColumn(sheet, headers, "mail", mail);
   sheet.spliceRows(row.number, 1);
   await saveWorkbookAtomic(workbook, filePath);
 }
@@ -156,21 +147,16 @@ export async function addApplicant(baseDir, fields) {
     qrupId,
     ad,
     soyad,
-    cinsiyyet,
-    vetendasliq,
-    dogumTarixi,
-    pasportNomresi,
-    pasportBitme,
-    olkeKodu,
+    mail,
     telefon,
     tarixBaslangic,
     tarixBitis,
-    saatAraligi,
+    vizaNovu,
     status,
   } = fields;
 
   if (!ad || !ad.trim()) throw new Error("Ad tələb olunur");
-  if (!pasportNomresi || !pasportNomresi.trim()) throw new Error("Pasport nömrəsi tələb olunur");
+  if (!mail || !mail.trim()) throw new Error("Mail tələb olunur");
 
   const filePath = applicantsFilePath(baseDir);
   const workbook = new ExcelJS.Workbook();
@@ -185,16 +171,11 @@ export async function addApplicant(baseDir, fields) {
       "qrup_id",
       "ad",
       "soyad",
-      "cinsiyyet",
-      "vetendasliq",
-      "dogum_tarixi",
-      "pasport_nomresi",
-      "pasport_bitme",
-      "olke_kodu",
+      "mail",
       "telefon",
       "tarix_baslangic",
       "tarix_bitis",
-      "saat_araligi",
+      "viza_novu",
       "status",
     ]);
   }
@@ -236,16 +217,11 @@ export async function addApplicant(baseDir, fields) {
   setCell("qrup_id", (qrupId ?? "").toString().trim());
   setCell("ad", ad.trim());
   setCell("soyad", (soyad || "").trim());
-  setCell("cinsiyyet", (cinsiyyet || "").trim());
-  setCell("vetendasliq", (vetendasliq || "").trim());
-  setDateCell("dogum_tarixi", dogumTarixi);
-  setCell("pasport_nomresi", pasportNomresi.trim());
-  setDateCell("pasport_bitme", pasportBitme);
-  setCell("olke_kodu", (olkeKodu || "").trim());
+  setCell("mail", mail.trim());
   setCell("telefon", (telefon || "").trim());
   setDateCell("tarix_baslangic", tarixBaslangic);
   setDateCell("tarix_bitis", tarixBitis);
-  setCell("saat_araligi", (saatAraligi || "").trim());
+  setCell("viza_novu", (vizaNovu ?? "").toString().trim());
   setCell("status", (status || "").trim());
   row.commit();
 
@@ -260,8 +236,8 @@ async function validateApplicantsBuffer(buffer) {
 
   const headers = [];
   sheet.getRow(1).eachCell({ includeEmpty: true }, (cell) => headers.push(normalizeHeader(cell.value)));
-  if (!headers.includes("pasport_nomresi")) {
-    throw new Error("Excel faylında 'pasport_nomresi' sütunu tapılmadı");
+  if (!headers.includes("mail")) {
+    throw new Error("Excel faylında 'mail' sütunu tapılmadı");
   }
 }
 
