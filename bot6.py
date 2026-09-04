@@ -15,7 +15,10 @@ from selenium.webdriver.support.ui import Select
 # --- KONFİQURASİYA (HƏQİQİ REJİM - AZƏRBAYCAN) ---
 EXCEL_FILE = "applicants.xlsx"  
 URL = "https://pieraksts.mfa.gov.lv/en/azerbaijan"  
-CHROME_VERSION = 150  
+# None = undetected_chromedriver quraşdırılmış Chrome versiyasını AVTOMATİK aşkarlayıb ona
+# uyğun driver endirir. Sabit rəqəm (məs. 150) yazsaq, Chrome yeniləndikcə (serverdə 152)
+# "only supports Chrome version X" xətası verir — ona görə avtomatik saxlayırıq.
+CHROME_VERSION = None
 
 # 🚨 SÜRƏT VƏ GÖZLƏMƏ AYARI (20-ci sətir) 🚨
 RETRY_DELAY_SECONDS = 15 
@@ -536,8 +539,21 @@ def run_worker_bot(group_data, target_date):
     except Exception as e:
         print(f"[!] İşçi Bot xətası (Qrup {group_data['qrup_id']}): {e}")
     finally:
-        input(f"\n[İşçi Bot Qrup {group_data['qrup_id']}] Enter sıxın...")
+        # Rezervasiyadan sonra brauzeri açıq saxlayırıq (ödəniş/təsdiq üçün). Lokal terminalda
+        # Enter gözləyir; serverdə (PM2, terminalsız) EOFError olur → uzun sleep ilə açıq qalır.
+        wait_or_pause(f"\n[İşçi Bot Qrup {group_data['qrup_id']}] Enter sıxın...")
         w_driver.quit()
+
+
+def wait_or_pause(prompt, fallback_seconds=1200):
+    """Lokal terminalda istifadəçidən Enter gözləyir. Serverdə (PM2 altında, stdin/terminal
+    yoxdur) input() dərhal EOFError verir — bu halda botu çökdürmək əvəzinə brauzeri açıq
+    saxlamaq üçün fallback_seconds qədər gözləyirik."""
+    try:
+        input(prompt)
+    except EOFError:
+        print(f"[i] Terminal yoxdur — {fallback_seconds} saniyə gözlənilir (brauzer açıq qalır)...")
+        time.sleep(fallback_seconds)
 
 
 def main():
@@ -553,7 +569,11 @@ def main():
     except Exception as e:
         print(f"\n[❌ CHROME INITIALIZATION ERROR] Chrome brauzer başladıla bilmədi!")
         traceback.print_exc()
-        input("\nÇıxmaq üçün Enter sıxın...")
+        # Fatal xəta — serverdə gözləmək mənasızdır, səliqəli çıxırıq (input() EOFError verərdi).
+        try:
+            input("\nÇıxmaq üçün Enter sıxın...")
+        except EOFError:
+            pass
         return
 
     attempt = 1
@@ -626,7 +646,8 @@ def main():
         print(f"\n[❌ GLOBAL SYSTEM ERROR] Kritik xəta baş verdi:")
         traceback.print_exc()
     finally:
-        input("\nKeşfiyyatçı brauzerini tam bağlamaq üçün Enter sıxın...")
+        # Yer tapılıb götürüldükdə kəşfiyyatçı brauzeri ödəniş üçün açıq qalmalıdır.
+        wait_or_pause("\nKeşfiyyatçı brauzerini tam bağlamaq üçün Enter sıxın...")
         try:
             driver.quit()
         except:
