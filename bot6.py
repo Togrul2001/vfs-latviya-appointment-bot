@@ -194,9 +194,14 @@ def setup_driver(suffix="default"):
     options.add_argument("--no-service-autorun")
     options.add_argument("--password-store=basic")
     options.add_argument("--discourage-unused-tab-memory-handler")
-    
+    # Serverdə Xvfb-nin window manager-i yoxdur — driver.maximize_window() orada
+    # "Runtime.evaluate wasn't found" xətası verir. Pəncərə ölçüsünü launch anında veririk
+    # (WM tələb etmir); --start-maximized isə lokalda (WM varsa) işə yarayır.
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--window-position=0,0")
+    options.add_argument("--start-maximized")
+
     driver = uc.Chrome(version_main=CHROME_VERSION, options=options)
-    driver.maximize_window()
     return driver
 
 
