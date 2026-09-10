@@ -191,9 +191,15 @@ def setup_driver(suffix="default"):
     options.add_argument("--no-service-autorun")
     options.add_argument("--password-store=basic")
     options.add_argument("--discourage-unused-tab-memory-handler")
-    
+    # Serverdə Xvfb-nin window manager-i yoxdur — driver.maximize_window() orada
+    # "Runtime.evaluate wasn't found" xətası verir. Pəncərə ölçüsünü launch anında veririk
+    # (WM tələb etmir); --start-maximized isə lokalda (WM varsa) işə yarayır.
+    # QEYD: Bu sətirləri silmə — maximize_window()-a qaytarsan serverdə bot çökür.
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--window-position=0,0")
+    options.add_argument("--start-maximized")
+
     driver = uc.Chrome(version_main=CHROME_VERSION, options=options)
-    driver.maximize_window()
     return driver
 
 
@@ -536,8 +542,20 @@ def run_worker_bot(group_data, target_date):
     except Exception as e:
         print(f"[!] İşçi Bot xətası (Qrup {group_data['qrup_id']}): {e}")
     finally:
-        input(f"\n[İşçi Bot Qrup {group_data['qrup_id']}] Enter sıxın...")
+        # QEYD: input()-ə qaytarma — serverdə (PM2, terminalsız) EOFError verib botu çökdürür.
+        wait_or_pause(f"\n[İşçi Bot Qrup {group_data['qrup_id']}] Enter sıxın...")
         w_driver.quit()
+
+
+def wait_or_pause(prompt, fallback_seconds=1200):
+    """Lokal terminalda istifadəçidən Enter gözləyir. Serverdə (PM2 altında, stdin/terminal
+    yoxdur) input() dərhal EOFError verir — bu halda botu çökdürmək əvəzinə brauzeri açıq
+    saxlamaq üçün fallback_seconds qədər gözləyirik."""
+    try:
+        input(prompt)
+    except EOFError:
+        print(f"[i] Terminal yoxdur — {fallback_seconds} saniyə gözlənilir (brauzer açıq qalır)...")
+        time.sleep(fallback_seconds)
 
 
 def main():
@@ -553,7 +571,11 @@ def main():
     except Exception as e:
         print(f"\n[❌ CHROME INITIALIZATION ERROR] Chrome brauzer başladıla bilmədi!")
         traceback.print_exc()
-        input("\nÇıxmaq üçün Enter sıxın...")
+        # Fatal xəta — serverdə gözləmək mənasızdır, səliqəli çıxırıq (input() EOFError verərdi).
+        try:
+            input("\nÇıxmaq üçün Enter sıxın...")
+        except EOFError:
+            pass
         return
 
     attempt = 1
@@ -626,7 +648,8 @@ def main():
         print(f"\n[❌ GLOBAL SYSTEM ERROR] Kritik xəta baş verdi:")
         traceback.print_exc()
     finally:
-        input("\nKeşfiyyatçı brauzerini tam bağlamaq üçün Enter sıxın...")
+        # QEYD: input()-ə qaytarma — serverdə brauzeri açıq saxlamaq üçün wait_or_pause lazımdır.
+        wait_or_pause("\nKeşfiyyatçı brauzerini tam bağlamaq üçün Enter sıxın...")
         try:
             driver.quit()
         except:
