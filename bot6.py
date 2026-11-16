@@ -1,40 +1,48 @@
 import os
-import re
 import time
 import datetime
 import threading
 import traceback
-import requests  # Telegram bildirişləri üçün daxil edildi
+import requests
 import pandas as pd
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import Select
+from selenium.common.exceptions import TimeoutException
 
 # --- KONFİQURASİYA (HƏQİQİ REJİM - AZƏRBAYCAN) ---
-EXCEL_FILE = "applicants.xlsx"  
-URL = "https://pieraksts.mfa.gov.lv/en/azerbaijan"  
-CHROME_VERSION = 152  
+EXCEL_FILE = "applicants.xlsx"
+URL = "https://pieraksts.mfa.gov.lv/en/azerbaijan"
+CHROME_VERSION = 152
 
-# 🚨 SÜRƏT VƏ GÖZLƏMƏ AYARI (20-ci sətir) 🚨
-RETRY_DELAY_SECONDS = 15 
+RETRY_DELAY_SECONDS = 15                 # Kəşfiyyatçının iki yoxlaması arasındakı fasilə
+CLOSE_BROWSER_AFTER_SUCCESS_SECONDS = 2  # Yer götürüldükdən neçə saniyə sonra brauzer bağlansın
+DEFAULT_END_DAYS = 180                   # tarix_bitis boşdursa / keçibsə: bu gündən +180 gün
 
-# 📬 TELEGRAM CANLI AYARLARINIZ (TAM İNTEQRASİYA OLUNDU)
-TELEGRAM_TOKEN = "8841983657:AAE7k3hOEhhb2YTAv6E_sv2hb7VLt7-5O2s"
+# 📬 TELEGRAM — köhnə token paylaşıldığı üçün @BotFather-də /revoke edib YENİSİNİ bura yazın
+TELEGRAM_TOKEN = "BURA_YENI_TOKENI_YAZIN"
 TELEGRAM_CHAT_ID = "8090158342"
 
-# HƏQİQİ REJİM: Yalnız Excel-dəki tarix aralığına düşən günlərə giriş ediləcək!
-IGNORE_EXCEL_DATES_FOR_TESTING = False  
+IGNORE_EXCEL_DATES_FOR_TESTING = False
 
-# Qlobal izləmə, anti-spam və təhlükəsizlik kilidləri
-ALREADY_TRIGGERED = set()
-NOTIFIED_OUT_OF_RANGE = set()  # Eyni kənar tarixin təkrar teleqramı doldurmaması üçün anti-spam
-excel_lock = threading.Lock()  
+# --- Qlobal vəziyyət (thread-safe) ---
+state_lock = threading.Lock()
+excel_lock = threading.Lock()
+driver_create_lock = threading.Lock()   # uc.Chrome eyni anda 2 dəfə yaradılanda çökür
+
+# Excel 'status' sütunundakı dəyərlər (açılan siyahı ilə eyni yazılmalıdır)
+STATUS_BOOKED = "Yer götürüldü"
+# Bu statuslu qruplar üçün axtarış APARILMIR ("Boş" və "Gözləyir" axtarılır)
+SKIP_STATUSES = {"yer götürüldü", "görüşü var", "1", "1.0"}
+
+COMPLETED_GROUPS = set()     # Yer götürülmüş qruplar — axtarış bunlar üçün dayanır
+IN_PROGRESS_GROUPS = set()   # Hazırda işçi brauzerdə rezervasiya edilən qruplar
+NOTIFIED_OUT_OF_RANGE = set()
 
 
+# ---------------------------------------------------------------- TELEGRAM
 def send_tg_notification(message):
-    """Teleqram hesabınıza dərhal canlı bildiriş göndərir."""
     if not TELEGRAM_TOKEN or "BURA_" in TELEGRAM_TOKEN:
         return
     try:
@@ -45,22 +53,65 @@ def send_tg_notification(message):
         print(f"[!] Teleqram bildirişi göndərilərkən xəta: {e}")
 
 
-def mark_group_as_completed_in_excel(qrup_id):
-    """Uğurlu qrupun Excel-dəki 'status' xanasını 1 edərək tam təhlükəsiz şəkildə yadda saxlayır."""
+# ---------------------------------------------------------------- EXCEL
+def _norm(v):
+    return "" if v is None else str(v).strip().lower()
+
+
+def mark_group_as_completed_in_excel(qrup_id, note):
+    """openpyxl ilə yalnız lazım olan xanaları dəyişir — açılan siyahı (dropdown), rənglər və format QORUNUR.
+    Qrupun bütün sətirlərinə status='Yer götürüldü', 'qeyd' sütununa isə tarix/saat yazılır."""
+    from openpyxl import load_workbook
     with excel_lock:
-        try:
-            df = pd.read_excel(EXCEL_FILE)
-            if 'status' not in df.columns:
-                df['status'] = pd.NA
-            df.loc[df['qrup_id'] == qrup_id, 'status'] = 1
-            df.to_excel(EXCEL_FILE, index=False)
-            print(f"[💾 EXCEL BAZA] Qrup ID {qrup_id} üçün status = 1 olaraq Excel-ə yazıldı.")
-        except Exception as e:
-            print(f"[!] Xəta: Excel faylına status yazılarkən problem baş verib: {e}")
+        for attempt in range(1, 6):
+            try:
+                wb = load_workbook(EXCEL_FILE)
+                ws = wb.active
+                headers = {_norm(c.value): c.column for c in ws[1] if c.value is not None}
+                if "qrup_id" not in headers or "status" not in headers:
+                    raise Exception("Excel-də 'qrup_id' və ya 'status' sütunu tapılmadı")
+                id_col, status_col = headers["qrup_id"], headers["status"]
+                if "qeyd" in headers:
+                    note_col = headers["qeyd"]
+                else:
+                    note_col = ws.max_column + 1
+                    ws.cell(row=1, column=note_col, value="qeyd")
+
+                current_id, changed = None, 0
+                for r in range(2, ws.max_row + 1):
+                    raw = ws.cell(row=r, column=id_col).value
+                    if raw not in (None, ""):
+                        try:
+                            current_id = int(float(raw))
+                        except Exception:
+                            current_id = None
+                    if current_id == qrup_id:   # boş qrup_id xanaları yuxarıdakı qrupa aiddir
+                        ws.cell(row=r, column=status_col, value=STATUS_BOOKED)
+                        ws.cell(row=r, column=note_col, value=note)
+                        changed += 1
+
+                wb.save(EXCEL_FILE)
+                print(f"[💾 EXCEL] Qrup {qrup_id}: {changed} sətir → status='{STATUS_BOOKED}', qeyd='{note}'")
+                return True
+            except Exception as e:
+                print(f"[⚠️ EXCEL] Yazmaq alınmadı (cəhd {attempt}/5) — Excel açıqdırsa bağlayın: {e}")
+                time.sleep(3)
+    send_tg_notification(f"⚠️ Qrup {qrup_id} üçün yer götürüldü, amma Excel-ə yazıla bilmədi!\nQeyd: {note}\nƏl ilə '{STATUS_BOOKED}' seçin.")
+    return False
+
+
+def _parse_viza(val):
+    try:
+        if isinstance(val, (int, float)) and not pd.isna(val):
+            return int(val)
+        if isinstance(val, str):
+            return int(''.join(c for c in val if c.isdigit()))
+    except Exception:
+        pass
+    return 1
 
 
 def parse_excel_groups(filepath):
-    """Excel faylını oxuyur və bütün tipləri zirehli formata salır."""
     with excel_lock:
         if not os.path.exists(filepath):
             print(f"[!] Xəta: '{filepath}' faylı tapılmadı!")
@@ -68,7 +119,7 @@ def parse_excel_groups(filepath):
         try:
             df = pd.read_excel(filepath)
         except Exception as e:
-            print(f"[⚠️ EXCEL KİLİDİ] Excel faylı oxunarkən problem baş verdi (Fayl açıq qalıb bilər): {e}")
+            print(f"[⚠️ EXCEL KİLİDİ] Excel oxunmadı (fayl açıq ola bilər): {e}")
             return {}
 
     if df.empty:
@@ -76,35 +127,31 @@ def parse_excel_groups(filepath):
 
     df['qrup_id'] = pd.to_numeric(df['qrup_id'], errors='coerce').ffill()
     df = df.dropna(subset=['qrup_id'])
-    try:
-        df['qrup_id'] = df['qrup_id'].astype(int)
-    except:
-        df['qrup_id'] = df['qrup_id'].astype(float).astype(int)
-    
+    df['qrup_id'] = df['qrup_id'].astype(float).astype(int)
+
     if 'status' not in df.columns:
-        df['status'] = pd.NA
-    else:
-        df['status'] = pd.to_numeric(df['status'], errors='coerce')
-    
+        df['status'] = ""
+    df['status'] = df['status'].apply(lambda v: "" if pd.isna(v) else str(v).strip().lower())
+
     groups = {}
     today = datetime.date.today()
 
     for q_id, group_df in df.groupby('qrup_id'):
-        if group_df['status'].eq(1).any():
+        if group_df['status'].isin(SKIP_STATUSES).any():
             continue
-            
+
         rows = group_df.to_dict(orient='records')
         if not rows:
             continue
-        
         main_row = rows[0]
-        
+
         email = str(main_row.get('mail', '')).strip()
         if '@' not in email or pd.isna(main_row.get('mail')) or email.lower() == 'nan':
             ad_clean = str(main_row['ad']).strip().lower()
             soyad_clean = str(main_row['soyad']).strip().lower()
             email = f"{ad_clean}.{soyad_clean}@mail.ru"
-            
+            print(f"[⚠️] Qrup {q_id}: e-poçt yoxdur, saxta ünvan yaradıldı ({email}) — təsdiq məktubu ərizəçiyə çatmayacaq!")
+
         phone_val = main_row.get('telefon', main_row.get('telefon.1', ''))
         if pd.isna(phone_val) or str(phone_val).strip() == '' or str(phone_val).strip().lower() == 'nan':
             phone = "+994555556025"
@@ -117,84 +164,72 @@ def parse_excel_groups(filepath):
 
         t_start = main_row.get('tarix_baslangic', pd.NaT)
         t_end = main_row.get('tarix_bitis', pd.NaT)
-        
-        if pd.isna(t_start) or t_start is pd.NaT:
-            t_start_dt = today
-        else:
-            t_start_dt = pd.to_datetime(t_start).to_pydatetime().date()
-            
-        if pd.isna(t_end) or t_end is pd.NaT or pd.to_datetime(t_end).to_pydatetime().date() < today:
-            t_end_dt = datetime.date(2026, 8, 31)
-        else:
-            t_end_dt = pd.to_datetime(t_end).to_pydatetime().date()
 
-        main_v_val = main_row.get('viza_novu', 1)
-        try:
-            if isinstance(main_v_val, (int, float)):
-                main_viza = int(main_v_val)
-            elif isinstance(main_v_val, str):
-                main_viza = int(''.join(c for c in main_v_val if c.isdigit()))
-            else:
-                main_viza = 1
-        except:
-            main_viza = 1
+        t_start_dt = today if pd.isna(t_start) else pd.to_datetime(t_start).date()
+        if pd.isna(t_end) or pd.to_datetime(t_end).date() < today:
+            # Köhnə kodda burada 2026-08-31 idi — o tarix artıq keçib və qrup heç vaxt uyğun gəlmirdi
+            t_end_dt = today + datetime.timedelta(days=DEFAULT_END_DAYS)
+        else:
+            t_end_dt = pd.to_datetime(t_end).date()
 
         main_applicant = {
             "name": str(main_row['ad']).strip().upper(),
             "surname": str(main_row['soyad']).strip().upper(),
             "email": email,
             "phone": phone,
-            "viza_novu": main_viza
+            "viza_novu": _parse_viza(main_row.get('viza_novu', 1)),
         }
-        
-        additional_visitors = []
-        for extra_row in rows[1:]:
-            extra_v_val = extra_row.get('viza_novu', 1)
-            try:
-                if isinstance(extra_v_val, (int, float)):
-                    extra_viza = int(extra_v_val)
-                elif isinstance(extra_v_val, str):
-                    extra_viza = int(''.join(c for c in extra_v_val if c.isdigit()))
-                else:
-                    extra_viza = 1
-            except:
-                extra_viza = 1
-            
-            additional_visitors.append({
-                "name": str(extra_row['ad']).strip().upper(),
-                "surname": str(extra_row['soyad']).strip().upper(),
-                "viza_novu": extra_viza
-            })
-            
+        additional_visitors = [{
+            "name": str(r['ad']).strip().upper(),
+            "surname": str(r['soyad']).strip().upper(),
+            "viza_novu": _parse_viza(r.get('viza_novu', 1)),
+        } for r in rows[1:]]
+
         groups[q_id] = {
             "qrup_id": q_id,
             "main_applicant": main_applicant,
             "additional_visitors": additional_visitors,
             "tarix_baslangic": t_start_dt,
-            "tarix_bitis": t_end_dt
+            "tarix_bitis": t_end_dt,
         }
-        
     return groups
 
 
+def group_accepts_date(g_data, d):
+    return IGNORE_EXCEL_DATES_FOR_TESTING or (g_data["tarix_baslangic"] <= d <= g_data["tarix_bitis"])
+
+
+# ---------------------------------------------------------------- BRAUZER
 def setup_driver(suffix="default"):
-    """🚨 YENİLƏNDİ: Həm profilləri təcrid edir, həm də diski doldurmaması üçün keş ölçüsünü kəsir."""
     options = uc.ChromeOptions()
     profile_path = os.path.abspath(f"bot_profile_{suffix}")
     options.add_argument(f"--user-data-dir={profile_path}")
-    
-    # 🌟 DİSK QORUYUCU: Chrome-un lazımsız fayllar yığaraq şişməsini tamamilə dayandırır
-    options.add_argument("--disk-cache-size=10485760")   # Maksimum 10 MB Disk Keşi
-    options.add_argument("--media-cache-size=5242880")   # Maksimum 5 MB Media Keşi
-    
+    options.add_argument("--disk-cache-size=10485760")
+    options.add_argument("--media-cache-size=5242880")
     options.add_argument("--no-first-run")
     options.add_argument("--no-service-autorun")
     options.add_argument("--password-store=basic")
-    options.add_argument("--discourage-unused-tab-memory-handler")
-    
-    driver = uc.Chrome(version_main=CHROME_VERSION, options=options)
+    with driver_create_lock:
+        driver = uc.Chrome(version_main=CHROME_VERSION, options=options)
     driver.maximize_window()
     return driver
+
+
+def safe_quit(driver):
+    if driver is None:
+        return
+    try:
+        driver.quit()
+    except Exception:
+        pass
+
+
+def driver_is_alive(driver):
+    try:
+        _ = driver.title
+        return True
+    except Exception:
+        return False
 
 
 def clear_all_site_data(driver):
@@ -212,7 +247,6 @@ def clear_all_site_data(driver):
 
 
 def force_fill_input(driver, element, text):
-    """JavaScript ilə xananı sıfırlayır və tək səfərdə yazır."""
     driver.execute_script("""
         arguments[0].value = '';
         arguments[0].value = arguments[1];
@@ -221,42 +255,30 @@ def force_fill_input(driver, element, text):
     """, element, text)
 
 
+# ---------------------------------------------------------------- FORM ADDIMLARI (dəyişməyib)
 def fill_form_for_group(driver, group_data):
     wait = WebDriverWait(driver, 10)
-    
-    # Visitor 1
-    name_field = wait.until(EC.presence_of_element_located((By.ID, "Persons[0][first_name]")))
-    name_field.clear()
-    force_fill_input(driver, name_field, group_data["main_applicant"]["name"])
-    
-    surname_field = wait.until(EC.presence_of_element_located((By.ID, "Persons[0][last_name]")))
-    surname_field.clear()
-    force_fill_input(driver, surname_field, group_data["main_applicant"]["surname"])
-    
-    email_field = wait.until(EC.presence_of_element_located((By.ID, "e_mail")))
-    email_field.clear()
-    force_fill_input(driver, email_field, group_data["main_applicant"]["email"])
-    
-    email_repeat_field = wait.until(EC.presence_of_element_located((By.ID, "e_mail_repeat")))
-    email_repeat_field.clear()
-    force_fill_input(driver, email_repeat_field, group_data["main_applicant"]["email"])
-    
-    phone_field = wait.until(EC.presence_of_element_located((By.ID, "phone")))
-    phone_field.clear()
-    force_fill_input(driver, phone_field, group_data["main_applicant"]["phone"])
-    
-    # Visitor 2+
+
+    for field_id, value in [
+        ("Persons[0][first_name]", group_data["main_applicant"]["name"]),
+        ("Persons[0][last_name]", group_data["main_applicant"]["surname"]),
+        ("e_mail", group_data["main_applicant"]["email"]),
+        ("e_mail_repeat", group_data["main_applicant"]["email"]),
+        ("phone", group_data["main_applicant"]["phone"]),
+    ]:
+        el = wait.until(EC.presence_of_element_located((By.ID, field_id)))
+        el.clear()
+        force_fill_input(driver, el, value)
+
     for index, visitor in enumerate(group_data["additional_visitors"]):
         dom_index = index + 1
         add_button = wait.until(EC.presence_of_element_located((By.XPATH, "//button[contains(@class, 'js-addVisitor')]")))
         driver.execute_script("arguments[0].click();", add_button)
-        
+
         add_name_field = wait.until(EC.presence_of_element_located((By.ID, f"Persons[{dom_index}][first_name]")))
         add_surname_field = wait.until(EC.presence_of_element_located((By.ID, f"Persons[{dom_index}][last_name]")))
-        
         add_name_field.clear()
         force_fill_input(driver, add_name_field, visitor["name"])
-        
         add_surname_field.clear()
         force_fill_input(driver, add_surname_field, visitor["surname"])
 
@@ -266,371 +288,369 @@ def fill_form_for_group(driver, group_data):
 
 
 def select_service_and_consent(driver, group_data):
-    """
-    HTML STRUKTURUNA TAM UYGUNLAŞDIRILMIŞ DÜZƏLİŞ:
-    Hər ərizəçinin 'section-base--wrapper' kartı daxilində sırayla:
-    1. Dropdown vurulur.
-    2. Viza növünün label-i kliklənir.
-    3. Açılan 'description active' daxilindəki 'active-confirmation' checkbox-u seçilir.
-    4. Məhz həmin bölmənin daxilindəki 'Add' düyməsi kliklənir.
-    """
     wait = WebDriverWait(driver, 12)
     print("[~] Xidmət və razılıq addımı işlənilir...")
-    
-    # Səhifədəki bütün ərizəçi bloklarını (kartlarını) tapırıq
+
     sections = wait.until(EC.presence_of_all_elements_located((By.CLASS_NAME, "section-base--wrapper")))
     num_visitors = len(sections)
-    
+
     for index in range(num_visitors):
         if index == 0:
             current_viza_novu = group_data["main_applicant"]["viza_novu"]
         else:
             current_viza_novu = group_data["additional_visitors"][index - 1]["viza_novu"]
-            
+
         visa_option_text = "Processing a Schengen visa" if current_viza_novu == 1 else "Processing a Latvian national visa"
         print(f"[~] Ərizəçi {index + 1}/{num_visitors} növü: {visa_option_text}")
-        
-        # Cari ərizəçinin konteyneri
+
         sections = wait.until(EC.presence_of_all_elements_located((By.CLASS_NAME, "section-base--wrapper")))
         current_section = sections[index]
-        
         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", current_section)
         time.sleep(0.3)
-        
-        # 1. Cari kartın daxilindəki Select Service dropdown-u vururuq
+
         dropdown = current_section.find_element(By.CLASS_NAME, "js-services")
         driver.execute_script("arguments[0].click();", dropdown)
         time.sleep(0.6)
-        
-        # 2. Cari kart daxilində uyğun viza label-ini tapıb klikləyirik
+
         visa_labels = current_section.find_elements(By.CLASS_NAME, "text--dropdown-service")
-        target_label = None
-        for lbl in visa_labels:
-            if visa_option_text.lower() in lbl.text.lower():
-                target_label = lbl
-                break
-                
-        if target_label:
-            driver.execute_script("arguments[0].click();", target_label)
-        else:
-            # Əgər mətn tapılmazsa fallback olaraq birinci label
-            driver.execute_script("arguments[0].click();", visa_labels[0])
-            
+        target_label = next((l for l in visa_labels if visa_option_text.lower() in l.text.lower()), None)
+        driver.execute_script("arguments[0].click();", target_label or visa_labels[0])
         time.sleep(0.8)
-        
-        # 3. Viza seçildikdən sonra açılan aktiv acıqlama bölməsindəki 'active-confirmation' checkbox-unu seçirik
+
         try:
             active_section = current_section.find_element(By.XPATH, ".//section[contains(@class, 'description') and contains(@class, 'active')]")
             checkbox = active_section.find_element(By.ID, "active-confirmation")
             cb_label = active_section.find_element(By.XPATH, ".//label[@for='active-confirmation']")
-            
             driver.execute_script("arguments[0].click();", cb_label)
             driver.execute_script("""
                 arguments[0].checked = true;
                 arguments[0].dispatchEvent(new Event('change', { bubbles: true }));
             """, checkbox)
         except Exception as e:
-            print(f"[!] Razılıq checkbox-u kliklənərkən xəbərdarlıq (Ərizəçi {index + 1}): {e}")
-            
+            print(f"[!] Razılıq checkbox-u xəbərdarlığı (Ərizəçi {index + 1}): {e}")
         time.sleep(0.6)
-        
-        # 4. Məhz aktiv olan təsvir (description) bölməsindəki 'Add' düyməsini klikləyirik
+
         try:
             add_btn = current_section.find_element(By.XPATH, ".//button[contains(normalize-space(), 'Add') or contains(text(), 'Add')]")
             driver.execute_script("""
                 arguments[0].scrollIntoView({block: 'center'});
                 arguments[0].click();
-                arguments[0].dispatchEvent(new Event('click', { bubbles: true }));
             """, add_btn)
-            print(f"[+] Ərizəçi {index + 1} üçün xidmət uğurla əlavə edildi (Add sıxıldı).")
+            print(f"[+] Ərizəçi {index + 1} üçün xidmət əlavə edildi.")
         except Exception as e:
-            print(f"[!] Add düyməsi kliklənərkən xəta (Ərizəçi {index + 1}): {e}")
-            
+            print(f"[!] Add düyməsi xətası (Ərizəçi {index + 1}): {e}")
         time.sleep(1.2)
 
-    # Bütün ərizəçilər tamamlandıqdan sonra növbəti mərhələyə keçid
-    next_step_xpath = "//button[contains(text(), 'Next step')]"
-    next_step_btn = wait.until(EC.presence_of_element_located((By.XPATH, next_step_xpath)))
+    next_step_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//button[contains(text(), 'Next step')]")))
     driver.execute_script("arguments[0].click();", next_step_btn)
     print("[+] Qrup üzvləri tamamlandı. Təqvimə keçilir.")
     return True
 
 
-def select_time_and_finalize(driver, qrup_id, group_data, target_date):
-    wait = WebDriverWait(driver, 15)
-    print(f"[~] Qrup ID {qrup_id}: Saat seçmə qutusu (dropdown) gözlənilir...")
-    
-    try:
-        select_xpath = "//select[@class='time' or contains(@name, 'visit_time')]"
-        select_el = wait.until(EC.presence_of_element_located((By.XPATH, select_xpath)))
-        
-        dropdown = Select(select_el)
-        selected_time_text = ""
-        
-        for option in dropdown.options:
-            val = option.get_attribute("value")
-            if val and val.strip():
-                dropdown.select_by_value(val)
-                selected_time_text = option.text.strip()
-                print(f"[+] Qrup ID {qrup_id}: Avtomatik təyin edilən saat: {selected_time_text}")
-                break
-                
-        if not selected_time_text:
-            dropdown.select_by_index(0)
-            
-        time.sleep(0.5)
-        
-        next_btn_xpath = "//*[@id='step3-next-btn']//button | //div[@id='step3-next-btn']//button"
-        next_btn = wait.until(EC.presence_of_element_located((By.XPATH, next_btn_xpath)))
-        driver.execute_script("arguments[0].click();", next_btn)
-            
-        print(f"[~] Qrup ID {qrup_id}: Son təsdiq (GDPR Approve) səhifəsinin gəlməsi gözlənilir...")
-        
-        gdpr_cb = wait.until(EC.presence_of_element_located((By.ID, "personal-data")))
-        
-        for _ in range(20):
-            try:
-                gdpr_label = driver.find_element(By.XPATH, "//label[@for='personal-data']")
-                driver.execute_script("arguments[0].click();", gdpr_label)
-                break
-            except:
-                time.sleep(0.1)
-                
-        driver.execute_script("arguments[0].checked = true; arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", gdpr_cb)
-        
-        time.sleep(1.0)  
-        
-        approve_btn_xpath = "//button[contains(text(), 'Approve')] | //button[contains(normalize-space(), 'Approve')]"
-        approve_btn = wait.until(EC.presence_of_element_located((By.XPATH, approve_btn_xpath)))
-        driver.execute_script("arguments[0].click();", approve_btn)
-                
-        name = group_data["main_applicant"]["name"]
-        surname = group_data["main_applicant"]["surname"]
-        email = group_data["main_applicant"]["email"]
-        
-        success_msg = (
-            f"🎉 [TEBRİKLƏR! REZERVASIYA TAMAMLANDI]\n\n"
-            f"👤 Ərizəçi: {name} {surname}\n"
-            f"📧 E-mail: {email}\n"
-            f"📅 Tarix: {target_date}\n"
-            f"⏰ Saat: {selected_time_text}\n"
-            f"👥 Qrup ID: {qrup_id}\n\n"
-            f"Viza yeriniz tamamilə uğurla götürüldü və təsdiqləndi! 🇱𝑽"
-        )
-        print(f"\n{success_msg}")
-        send_tg_notification(success_msg)
-        time.sleep(4)
-        
-    except Exception as e:
-        print(f"[!] Saat seçimi və ya Yekun Təsdiq (Approve) mərhələsində kritik xəta: {e}")
-        raise e  
+# ---------------------------------------------------------------- TƏQVİM
+NEXT_MONTH_XPATH = "//*[text()='>' or contains(@class, 'arrow-right') or contains(@class, 'next')]"
 
 
-def scan_calendar_for_2_months(driver, all_groups, scout_id):
+def read_active_days(driver):
+    days = []
+    for el in driver.find_elements(By.XPATH, "//td[contains(@class, 'cal-active')]"):
+        try:
+            raw = el.get_attribute("data-date")
+            if not raw:
+                continue
+            y, m, d = [int(x) for x in raw.split('-')]
+            days.append((datetime.date(y, m, d), raw))
+        except Exception:
+            continue
+    return days
+
+
+def scan_calendar(driver):
+    """İki ayı tarayır, HEÇ NƏYƏ KLİKLƏMİR. Bütün aktiv günləri qaytarır + hazırda göstərilən ayın indeksi."""
     wait = WebDriverWait(driver, 10)
-    global NOTIFIED_OUT_OF_RANGE
-    
+    found, seen, current_month = [], set(), 0
+
     for month_index in range(2):
         wait.until(EC.presence_of_element_located((By.ID, "calendar-daygrid")))
-        clickable_days = driver.find_elements(By.XPATH, "//td[contains(@class, 'cal-active')]")
-        
-        for day_el in clickable_days:
-            try:
-                date_str = day_el.get_attribute("data-date")
-                if not date_str:
-                    continue
-                    
-                parts = [int(x) for x in date_str.split('-')]
-                slot_date = datetime.date(parts[0], parts[1], parts[2])
-                
-                print(f"[🔥] Səhifədə aktiv gün tapıldı: {slot_date}. Excel analiz edilir...")
-                
-                matched_group = None
-                for g_id, g_data in all_groups.items():
-                    if IGNORE_EXCEL_DATES_FOR_TESTING or (g_data["tarix_baslangic"] <= slot_date <= g_data["tarix_bitis"]):
-                        matched_group = (g_id, g_data)
-                        break
-                
-                if matched_group:
-                    g_id, g_data = matched_group
-                    name = g_data["main_applicant"]["name"]
-                    surname = g_data["main_applicant"]["surname"]
-                    
-                    alert_msg = (
-                        f"🔥 [UYĞUN TARİX TAPILDI!]\n\n"
-                        f"📅 Tarix: {slot_date}\n"
-                        f"👥 Qrup ID: {g_id}\n"
-                        f"👤 Ərizəçi: {name} {surname}\n\n"
-                        f"Tarix Excel aralığınıza tam uyğundur! Bot dərhal yerin götürülməsinə başladı..."
-                    )
-                    print(alert_msg)
-                    send_tg_notification(alert_msg)
-                    
-                    driver.execute_script("arguments[0].click();", day_el)
-                        
-                    if g_id == scout_id:
-                        return {"action": "scout_take", "date": slot_date, "matched_group_id": g_id}
-                    else:
-                        return {"action": "trigger_worker", "date": slot_date, "matched_group_id": g_id}
-                else:
-                    if slot_date not in NOTIFIED_OUT_OF_RANGE:
-                        out_msg = (
-                            f"⚠️ [KƏNAR TARİX AÇILDI!]\n\n"
-                            f"Təqvimdə boş yer tapıldı, lakin Excel-dəki tarix aralığınıza uyğun deyil!\n\n"
-                            f"📅 Tarix: {slot_date}\n\n"
-                            f"(Qeyd: Aralığa uyğun olmadığı üçün bot bu yeri götürmədi, uyğun gün üçün pusquya davam edir)."
-                        )
-                        print(out_msg)
-                        send_tg_notification(out_msg)
-                        NOTIFIED_OUT_OF_RANGE.add(slot_date)  # Anti-Spam kilidi
-                        
-            except Exception:
+        for d, raw in read_active_days(driver):
+            if raw in seen:
                 continue
+            seen.add(raw)
+            found.append({"date": d, "raw": raw, "month_index": month_index})
+            print(f"[🔥] Aktiv gün tapıldı: {d}")
 
         if month_index == 0:
             try:
-                next_month_btn = driver.find_element(By.XPATH, "//*[text()='>' or contains(@class, 'arrow-right') or contains(@class, 'next')]")
-                driver.execute_script("arguments[0].click();", next_month_btn)
+                btn = driver.find_element(By.XPATH, NEXT_MONTH_XPATH)
+                driver.execute_script("arguments[0].click();", btn)
                 time.sleep(1.2)
+                current_month = 1
             except Exception:
                 break
-                
-    return None
+
+    found.sort(key=lambda x: x["date"])
+    return found, current_month
 
 
-def run_worker_bot(group_data, target_date):
-    trigger_key = f"{group_data['qrup_id']}_{target_date}"
-    if trigger_key in ALREADY_TRIGGERED:
+def plan_assignments(days, groups):
+    """Hər qrupa öz aralığına düşən ƏN ERKƏN günü təyin edir.
+    Eyni günə düşən qruplar fərqli saat indeksləri alır ki, eyni saat üçün bir-birinə mane olmasınlar."""
+    plan, per_day_count = {}, {}
+    for gid in sorted(groups):
+        for day in days:
+            if group_accepts_date(groups[gid], day["date"]):
+                idx = per_day_count.get(day["raw"], 0)
+                per_day_count[day["raw"]] = idx + 1
+                plan[gid] = {**day, "time_index": idx}
+                break
+    return plan
+
+
+def notify_out_of_range(days, groups):
+    for day in days:
+        d = day["date"]
+        if any(group_accepts_date(g, d) for g in groups.values()):
+            continue
+        if d in NOTIFIED_OUT_OF_RANGE:
+            continue
+        NOTIFIED_OUT_OF_RANGE.add(d)
+        msg = (f"⚠️ [KƏNAR TARİX AÇILDI]\n\n📅 Tarix: {d}\n\n"
+               f"Heç bir aktiv qrupun aralığına düşmür — bot bu yeri götürmədi.")
+        print(msg)
+        send_tg_notification(msg)
+
+
+def click_date_in_view(driver, raw):
+    els = driver.find_elements(By.XPATH, f"//td[contains(@class, 'cal-active') and @data-date='{raw}']")
+    if not els:
+        return False
+    driver.execute_script("arguments[0].click();", els[0])
+    return True
+
+
+def click_date_with_navigation(driver, raw):
+    """Təqvim 1-ci aydadır: gün burada yoxdursa növbəti aya keçib axtarır."""
+    WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "calendar-daygrid")))
+    if click_date_in_view(driver, raw):
         return
-    ALREADY_TRIGGERED.add(trigger_key)
-    
-    print(f"\n[🚀 İŞÇİ BOT START] Qrup {group_data['qrup_id']} fəaliyyətə başladı! Hədəf Tarix: {target_date}")
-    
-    w_driver = setup_driver(suffix=f"worker_{group_data['qrup_id']}")
+    btn = driver.find_element(By.XPATH, NEXT_MONTH_XPATH)
+    driver.execute_script("arguments[0].click();", btn)
+    time.sleep(1.2)
+    if not click_date_in_view(driver, raw):
+        raise Exception(f"{raw} günü təqvimdə artıq aktiv deyil (başqası götürmüş ola bilər).")
+
+
+# ---------------------------------------------------------------- SAAT + TƏSDİQ
+def select_time_and_finalize(driver, qrup_id, time_index=0):
+    """Saatı seçir, GDPR-i işarələyir, Approve basır. (saat_mətni, səhifə_dəyişdimi) qaytarır."""
+    wait = WebDriverWait(driver, 15)
+    print(f"[~] Qrup {qrup_id}: saat seçimi gözlənilir...")
+
+    select_el = wait.until(EC.presence_of_element_located((By.XPATH, "//select[@class='time' or contains(@name, 'visit_time')]")))
+    dropdown = Select(select_el)
+    valid = [o for o in dropdown.options if (o.get_attribute("value") or "").strip()]
+    if not valid:
+        raise Exception("Saat siyahısı boşdur — gün artıq dolub.")
+
+    chosen = valid[min(time_index, len(valid) - 1)]
+    dropdown.select_by_value(chosen.get_attribute("value"))
+    selected_time_text = chosen.text.strip()
+    print(f"[+] Qrup {qrup_id}: seçilən saat {selected_time_text}")
+    time.sleep(0.5)
+
+    next_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//*[@id='step3-next-btn']//button")))
+    driver.execute_script("arguments[0].click();", next_btn)
+
+    gdpr_cb = wait.until(EC.presence_of_element_located((By.ID, "personal-data")))
     try:
-        w_driver.get(URL)
-        WebDriverWait(w_driver, 10).until(EC.presence_of_element_located((By.ID, "Persons[0][first_name]")))
-        
-        fill_form_for_group(w_driver, group_data)
-        
-        if select_service_and_consent(w_driver, group_data):
-            wait = WebDriverWait(w_driver, 10)
-            wait.until(EC.presence_of_element_located((By.ID, "calendar-daygrid")))
-            
-            target_date_str = f"{target_date.year}-{target_date.month}-{target_date.day}"
-            day_xpath = f"//td[contains(@class, 'cal-active') and @data-date='{target_date_str}']"
-            
-            try:
-                target_day_el = w_driver.find_element(By.XPATH, day_xpath)
-                w_driver.execute_script("arguments[0].click();", target_day_el)
-            except:
-                next_month_btn = w_driver.find_element(By.XPATH, "//*[text()='>' or contains(@class, 'arrow-right') or contains(@class, 'next')]")
-                w_driver.execute_script("arguments[0].click();", next_month_btn)
-                time.sleep(1.2)
-                target_day_el = w_driver.find_element(By.XPATH, day_xpath)
-                w_driver.execute_script("arguments[0].click();", target_day_el)
-                
-            print(f"[🔥 UĞURLU] İşçi Bot Qrup {group_data['qrup_id']} üçün {target_date} gününü kliklədi!")
-            select_time_and_finalize(w_driver, group_data['qrup_id'], group_data, target_date)
-            
+        gdpr_label = driver.find_element(By.XPATH, "//label[@for='personal-data']")
+        driver.execute_script("arguments[0].click();", gdpr_label)
+    except Exception:
+        pass
+    driver.execute_script("arguments[0].checked = true; arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", gdpr_cb)
+    time.sleep(1.0)
+
+    approve_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//button[contains(normalize-space(), 'Approve')]")))
+    old_url = driver.current_url
+    driver.execute_script("arguments[0].click();", approve_btn)
+
+    # Approve-dan sonra səhifə dəyişdimi? (düymə yox oldu və ya URL dəyişdi)
+    try:
+        WebDriverWait(driver, 15).until(lambda d: d.current_url != old_url or not approve_btn.is_displayed())
+        confirmed = True
+    except Exception:
+        # StaleElement da "səhifə dəyişdi" deməkdir
+        try:
+            approve_btn.is_displayed()
+            confirmed = False
+        except Exception:
+            confirmed = True
+    return selected_time_text, confirmed
+
+
+def full_booking_flow(driver, group_data, raw_date, time_index):
+    """Sıfırdan: forma → xidmət → təqvim → gün → saat → Approve."""
+    driver.get(URL)
+    WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "Persons[0][first_name]")))
+    fill_form_for_group(driver, group_data)
+    select_service_and_consent(driver, group_data)
+    click_date_with_navigation(driver, raw_date)
+    return select_time_and_finalize(driver, group_data["qrup_id"], time_index)
+
+
+# ---------------------------------------------------------------- NƏTİCƏ
+def format_people(group_data):
+    """Qrupdakı BÜTÜN şəxslərin ad-soyadını nömrələnmiş siyahı kimi qaytarır."""
+    people = [group_data["main_applicant"]] + group_data["additional_visitors"]
+    return "\n".join(f"   {i}. {p['name']} {p['surname']}" for i, p in enumerate(people, 1))
+
+
+def on_booking_success(group_data, target_date, time_text, confirmed):
+    gid = group_data["qrup_id"]
+    with state_lock:
+        COMPLETED_GROUPS.add(gid)
+        IN_PROGRESS_GROUPS.discard(gid)
+
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    note = f"Yer götürüldü: {target_date} {time_text} (bot: {stamp})"
+    if not confirmed:
+        note += " — YOXLAYIN"
+    mark_group_as_completed_in_excel(gid, note)
+
+    a = group_data["main_applicant"]
+    msg = (f"🎉 [REZERVASIYA TAMAMLANDI]\n\n"
+           f"👤 Şəxslər ({1 + len(group_data['additional_visitors'])} nəfər):\n{format_people(group_data)}\n"
+           f"📧 {a['email']}\n📅 {target_date}\n⏰ {time_text}\n👥 Qrup ID: {gid}")
+    if not confirmed:
+        msg += "\n\n⚠️ Approve-dan sonra səhifə dəyişmədi — e-poçtu / saytı əl ilə yoxlayın!"
+    print(f"\n{msg}")
+    send_tg_notification(msg)
+
+
+def on_booking_failure(group_data, target_date, err):
+    gid = group_data["qrup_id"]
+    with state_lock:
+        IN_PROGRESS_GROUPS.discard(gid)   # növbəti dövrdə yenidən axtarılacaq
+    msg = f"❌ Qrup {gid} üçün {target_date} götürülə bilmədi: {err}\n{format_people(group_data)}\nAxtarış davam edir."
+    print(msg)
+    send_tg_notification(msg)
+
+
+def run_worker_bot(group_data, target_date, raw_date, time_index):
+    gid = group_data["qrup_id"]
+    print(f"\n[🚀 İŞÇİ BOT] Qrup {gid} → {target_date} (saat indeksi {time_index})")
+    w_driver = None
+    try:
+        w_driver = setup_driver(suffix=f"worker_{gid}")
+        time_text, confirmed = full_booking_flow(w_driver, group_data, raw_date, time_index)
+        on_booking_success(group_data, target_date, time_text, confirmed)
+        time.sleep(CLOSE_BROWSER_AFTER_SUCCESS_SECONDS)
     except Exception as e:
-        print(f"[!] İşçi Bot xətası (Qrup {group_data['qrup_id']}): {e}")
+        on_booking_failure(group_data, target_date, e)
     finally:
-        input(f"\n[İşçi Bot Qrup {group_data['qrup_id']}] Enter sıxın...")
-        w_driver.quit()
+        safe_quit(w_driver)
+        print(f"[🔒] İşçi brauzer bağlandı (Qrup {gid}).")
 
 
+def launch_worker(group_data, assignment):
+    gid = group_data["qrup_id"]
+    with state_lock:
+        if gid in IN_PROGRESS_GROUPS or gid in COMPLETED_GROUPS:
+            return
+        IN_PROGRESS_GROUPS.add(gid)
+    t = threading.Thread(target=run_worker_bot,
+                         args=(group_data, assignment["date"], assignment["raw"], assignment["time_index"]),
+                         daemon=True)
+    t.start()
+
+
+# ---------------------------------------------------------------- MAIN
 def main():
     print("[*] Bot AZƏRBAYCAN CANLI REJİMİNDƏ başladıldı.")
-    
-    start_msg = "🚀 Bot uğurla başladıldı! Canlı təqvim pusqusu aktivdir. Səhifədə yer açılan milisaniyədə sizə dərhal xəbər veriləcək. 🎯"
-    send_tg_notification(start_msg)
-    
-    try:
-        driver = setup_driver(suffix="scout")
-        print("[+] Brauzer açıldı. İlkin olaraq dərhal səhifəyə keçid edilir...")
-        driver.get(URL)  
-    except Exception as e:
-        print(f"\n[❌ CHROME INITIALIZATION ERROR] Chrome brauzer başladıla bilmədi!")
-        traceback.print_exc()
-        input("\nÇıxmaq üçün Enter sıxın...")
-        return
+    send_tg_notification("🚀 Bot başladıldı! Bütün qruplar üçün təqvim izlənilir. 🎯")
 
+    driver = None
     attempt = 1
     try:
         while True:
             all_groups = parse_excel_groups(EXCEL_FILE)
-            if not all_groups:
-                print("\n[~] Növbə gözlənilir: Excel-də aktiv/oxunabilən qrup tapılmadı. 7 saniyə sonra yenidən yoxlanacaq...")
+            with state_lock:
+                busy = COMPLETED_GROUPS | IN_PROGRESS_GROUPS
+            free_groups = {g: d for g, d in all_groups.items() if g not in busy}
+
+            if not free_groups:
+                print("\n[~] Axtarılacaq aktiv qrup yoxdur (hamısı götürülüb və ya işçidədir). 7 san sonra yoxlanacaq...")
                 time.sleep(7)
                 continue
 
-            group_ids = sorted(list(all_groups.keys()))
-            scout_id = group_ids[0]
-            scout_data = all_groups[scout_id]
-            
-            print(f"\n[~] Cəhd #{attempt}: Keşfiyyatçı Qrup ID {scout_id} məlumatları ilə formu doldurur...")
-            
-            driver.get(URL)
-            time.sleep(1.0) 
-                
-            WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "Persons[0][first_name]")))
-            
+            scout_id = min(free_groups)
+            scout_data = free_groups[scout_id]
+            print(f"\n[~] Cəhd #{attempt}: kəşfiyyatçı Qrup {scout_id} ilə yoxlayır. "
+                  f"Aktiv qruplar: {sorted(free_groups)}")
+
             try:
+                if driver is None or not driver_is_alive(driver):
+                    safe_quit(driver)
+                    driver = setup_driver(suffix="scout")
+
+                driver.get(URL)
+                WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "Persons[0][first_name]")))
                 fill_form_for_group(driver, scout_data)
-                
-                if not select_service_and_consent(driver, scout_data):
-                    raise Exception("Xidmət seçimi addımı tamamlana bilmədi. Səhifə yenidən başladılacaq.")
-                
-                result = scan_calendar_for_2_months(driver, all_groups, scout_id)
-                
-                if result:
-                    matched_date = result["date"]
-                    matched_gid = result["matched_group_id"]
-                    
-                    if result["action"] == "scout_take":
-                        select_time_and_finalize(driver, matched_gid, scout_data, matched_date)
-                        mark_group_as_completed_in_excel(matched_gid)
-                        
-                        for g_id in group_ids[1:]:
-                            w_data = all_groups[g_id]
-                            if IGNORE_EXCEL_DATES_FOR_TESTING or (w_data["tarix_baslangic"] <= matched_date <= w_data["tarix_bitis"]):
-                                mark_group_as_completed_in_excel(g_id)
-                                t = threading.Thread(target=run_worker_bot, args=(w_data, matched_date))
-                                t.daemon = True
-                                t.start()
-                        break
-                        
-                    elif result["action"] == "trigger_worker":
-                        mark_group_as_completed_in_excel(matched_gid)
-                        w_data = all_groups[matched_gid]
-                        t = threading.Thread(target=run_worker_bot, args=(w_data, matched_date))
-                        t.daemon = True
-                        t.start()
-                else:
+                select_service_and_consent(driver, scout_data)
+
+                days, current_month = scan_calendar(driver)
+                if not days:
                     print("[-] Bu ay və növbəti ayda boş yer yoxdur.")
-                    
+                else:
+                    notify_out_of_range(days, free_groups)
+                    plan = plan_assignments(days, free_groups)
+
+                    if plan:
+                        lines = "\n\n".join(f"👥 Qrup {g} — 📅 {a['date']}\n{format_people(free_groups[g])}" for g, a in sorted(plan.items()))
+                        msg = f"🔥 [UYĞUN TARİX(LƏR) TAPILDI]\n\n{lines}\n\nRezervasiyaya başlanılır..."
+                        print(msg)
+                        send_tg_notification(msg)
+
+                    # 1) Digər qruplar — hər biri öz brauzerində PARALEL
+                    for gid, assignment in plan.items():
+                        if gid != scout_id:
+                            launch_worker(free_groups[gid], assignment)
+
+                    # 2) Kəşfiyyatçının öz qrupu — elə bu brauzerdə
+                    if scout_id in plan:
+                        a = plan[scout_id]
+                        with state_lock:
+                            IN_PROGRESS_GROUPS.add(scout_id)
+                        try:
+                            if a["month_index"] == current_month and click_date_in_view(driver, a["raw"]):
+                                time_text, confirmed = select_time_and_finalize(driver, scout_id, a["time_index"])
+                            else:
+                                time_text, confirmed = full_booking_flow(driver, scout_data, a["raw"], a["time_index"])
+                            on_booking_success(scout_data, a["date"], time_text, confirmed)
+                            time.sleep(CLOSE_BROWSER_AFTER_SUCCESS_SECONDS)
+                        except Exception as e:
+                            on_booking_failure(scout_data, a["date"], e)
+                        finally:
+                            # Uğurlu/uğursuz — brauzer bağlanır, növbəti dövrdə təzəsi açılır
+                            safe_quit(driver)
+                            driver = None
+                            print("[🔒] Kəşfiyyatçı brauzer bağlandı.")
+
             except Exception as e:
                 print(f"[!] Döngü daxili xəta: {e}")
                 traceback.print_exc()
-            
-            clear_all_site_data(driver)
-            
+
+            if driver is not None:
+                clear_all_site_data(driver)
+
             print(f"[⏳] Növbəti cəhd üçün {RETRY_DELAY_SECONDS} saniyə gözlənilir...")
             time.sleep(RETRY_DELAY_SECONDS)
             attempt += 1
-            
+
     except KeyboardInterrupt:
         print("\n[-] Sistem dayandırıldı.")
-    except Exception as e:
-        print(f"\n[❌ GLOBAL SYSTEM ERROR] Kritik xəta baş verdi:")
-        traceback.print_exc()
     finally:
-        input("\nKeşfiyyatçı brauzerini tam bağlamaq üçün Enter sıxın...")
-        try:
-            driver.quit()
-        except:
-            pass
+        safe_quit(driver)
 
 
 if __name__ == "__main__":
