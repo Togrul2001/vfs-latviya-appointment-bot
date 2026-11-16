@@ -1,4 +1,7 @@
 import os
+import re
+import shutil
+import subprocess
 import time
 import datetime
 import threading
@@ -14,7 +17,36 @@ from selenium.common.exceptions import TimeoutException
 # --- KONFİQURASİYA (HƏQİQİ REJİM - AZƏRBAYCAN) ---
 EXCEL_FILE = "applicants.xlsx"
 URL = "https://pieraksts.mfa.gov.lv/en/azerbaijan"
-CHROME_VERSION = 152
+
+
+def detect_chrome_major_version():
+    """Kompüterdə/serverdə quraşdırılmış Chrome-un əsas versiyasını (məs. 152) özü tapır.
+    Chrome yenilənəndə kodda heç nə dəyişmək lazım deyil."""
+    candidates = ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]
+    for name in candidates:
+        path = shutil.which(name)
+        if not path:
+            continue
+        try:
+            out = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=10).stdout
+            m = re.search(r"(\d+)\.\d+\.\d+", out)
+            if m:
+                return int(m.group(1))
+        except Exception:
+            pass
+    # Windows: reyestrdən oxuyuruq
+    if os.name == "nt":
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Google\Chrome\BLBeacon")
+            return int(str(winreg.QueryValueEx(key, "version")[0]).split(".")[0])
+        except Exception:
+            pass
+    return None   # tapılmasa undetected_chromedriver özü müəyyənləşdirməyə çalışacaq
+
+
+CHROME_VERSION = detect_chrome_major_version()
+print(f"[i] Tapılan Chrome versiyası: {CHROME_VERSION or 'avtomatik (tapılmadı)'}")
 
 RETRY_DELAY_SECONDS = 15                 # Kəşfiyyatçının iki yoxlaması arasındakı fasilə
 CLOSE_BROWSER_AFTER_SUCCESS_SECONDS = 2  # Yer götürüldükdən neçə saniyə sonra brauzer bağlansın
@@ -594,8 +626,10 @@ def main():
 
             scout_id = min(free_groups)
             scout_data = free_groups[scout_id]
-            print(f"\n[~] Cəhd #{attempt}: kəşfiyyatçı Qrup {scout_id} ilə yoxlayır. "
-                  f"Aktiv qruplar: {sorted(free_groups)}")
+            groups_info = ", ".join(
+                f"ID {g} ({1 + len(d['additional_visitors'])} nəfər)" for g, d in sorted(free_groups.items()))
+            print(f"\n[~] Cəhd #{attempt}: kəşfiyyatçı Qrup ID {scout_id} ilə yoxlayır. "
+                  f"Aktiv qruplar ({len(free_groups)} qrup): {groups_info}")
 
             try:
                 if driver is None or not driver_is_alive(driver):

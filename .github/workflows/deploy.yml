@@ -24,6 +24,14 @@ jobs:
             git fetch origin main
             git reset --hard origin/main
             pip3 install -r requirements.txt --break-system-packages
+            # Google Chrome-u ən son versiyaya yeniləyir (xəta olsa deploy dayanmır).
+            # Versiya dəyişibsə, köhnə chromedriver keşi silinir ki, uyğun yenisi yüklənsin.
+            OLD_CHROME=$(google-chrome --version 2>/dev/null || true)
+            apt-get update -qq || true
+            apt-get install --only-upgrade -y google-chrome-stable || echo "Chrome yenilənə bilmədi"
+            NEW_CHROME=$(google-chrome --version 2>/dev/null || true)
+            echo "Chrome: $OLD_CHROME -> $NEW_CHROME"
+            if [ "$OLD_CHROME" != "$NEW_CHROME" ]; then rm -rf ~/.local/share/undetected_chromedriver; fi
             cd dashboard/server && npm install
             cd ../frontend && npm install && npm run build
             pm2 restart latviya-dashboard
