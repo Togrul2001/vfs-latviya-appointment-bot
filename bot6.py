@@ -20,9 +20,10 @@ RETRY_DELAY_SECONDS = 15                 # Kəşfiyyatçının iki yoxlaması ar
 CLOSE_BROWSER_AFTER_SUCCESS_SECONDS = 2  # Yer götürüldükdən neçə saniyə sonra brauzer bağlansın
 DEFAULT_END_DAYS = 180                   # tarix_bitis boşdursa / keçibsə: bu gündən +180 gün
 
-# 📬 TELEGRAM — köhnə token paylaşıldığı üçün @BotFather-də /revoke edib YENİSİNİ bura yazın
-TELEGRAM_TOKEN = "BURA_YENI_TOKENI_YAZIN"
-TELEGRAM_CHAT_ID = "8090158342"
+# 📬 TELEGRAM — token .env faylındakı TELEGRAM_TOKEN-dən oxunur (dashboard .env-i bota ötürür).
+# Köhnə token paylaşıldığı üçün @BotFather-də /revoke edib YENİSİNİ .env-ə yazın.
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip() or "BURA_YENI_TOKENI_YAZIN"
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip() or "8090158342"
 
 IGNORE_EXCEL_DATES_FOR_TESTING = False
 
@@ -209,22 +210,17 @@ def setup_driver(suffix="default"):
     options.add_argument("--no-first-run")
     options.add_argument("--no-service-autorun")
     options.add_argument("--password-store=basic")
-<<<<<<< HEAD
-    with driver_create_lock:
-        driver = uc.Chrome(version_main=CHROME_VERSION, options=options)
-    driver.maximize_window()
-=======
     options.add_argument("--discourage-unused-tab-memory-handler")
     # Serverdə Xvfb-nin window manager-i yoxdur — driver.maximize_window() orada
-    # "Runtime.evaluate wasn't found" xətası verir. Pəncərə ölçüsünü launch anında veririk
-    # (WM tələb etmir); --start-maximized isə lokalda (WM varsa) işə yarayır.
+    # "Runtime.evaluate wasn't found" xətası verir. Pəncərə ölçüsünü launch anında veririk.
     # QEYD: Bu sətirləri silmə — maximize_window()-a qaytarsan serverdə bot çökür.
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--window-position=0,0")
     options.add_argument("--start-maximized")
 
-    driver = uc.Chrome(version_main=CHROME_VERSION, options=options)
->>>>>>> 544081cc86190b19ca64abac507e2ef927a85753
+    # Bir neçə işçi brauzer eyni anda açılanda uc.Chrome çökməsin deyə bir-bir yaradılır
+    with driver_create_lock:
+        driver = uc.Chrome(version_main=CHROME_VERSION, options=options)
     return driver
 
 
@@ -561,7 +557,6 @@ def run_worker_bot(group_data, target_date, raw_date, time_index):
     except Exception as e:
         on_booking_failure(group_data, target_date, e)
     finally:
-<<<<<<< HEAD
         safe_quit(w_driver)
         print(f"[🔒] İşçi brauzer bağlandı (Qrup {gid}).")
 
@@ -582,43 +577,6 @@ def launch_worker(group_data, assignment):
 def main():
     print("[*] Bot AZƏRBAYCAN CANLI REJİMİNDƏ başladıldı.")
     send_tg_notification("🚀 Bot başladıldı! Bütün qruplar üçün təqvim izlənilir. 🎯")
-=======
-        # QEYD: input()-ə qaytarma — serverdə (PM2, terminalsız) EOFError verib botu çökdürür.
-        wait_or_pause(f"\n[İşçi Bot Qrup {group_data['qrup_id']}] Enter sıxın...")
-        w_driver.quit()
-
-
-def wait_or_pause(prompt, fallback_seconds=1200):
-    """Lokal terminalda istifadəçidən Enter gözləyir. Serverdə (PM2 altında, stdin/terminal
-    yoxdur) input() dərhal EOFError verir — bu halda botu çökdürmək əvəzinə brauzeri açıq
-    saxlamaq üçün fallback_seconds qədər gözləyirik."""
-    try:
-        input(prompt)
-    except EOFError:
-        print(f"[i] Terminal yoxdur — {fallback_seconds} saniyə gözlənilir (brauzer açıq qalır)...")
-        time.sleep(fallback_seconds)
-
-
-def main():
-    print("[*] Bot AZƏRBAYCAN CANLI REJİMİNDƏ başladıldı.")
-    
-    start_msg = "🚀 Bot uğurla başladıldı! Canlı təqvim pusqusu aktivdir. Səhifədə yer açılan milisaniyədə sizə dərhal xəbər veriləcək. 🎯"
-    send_tg_notification(start_msg)
-    
-    try:
-        driver = setup_driver(suffix="scout")
-        print("[+] Brauzer açıldı. İlkin olaraq dərhal səhifəyə keçid edilir...")
-        driver.get(URL)  
-    except Exception as e:
-        print(f"\n[❌ CHROME INITIALIZATION ERROR] Chrome brauzer başladıla bilmədi!")
-        traceback.print_exc()
-        # Fatal xəta — serverdə gözləmək mənasızdır, səliqəli çıxırıq (input() EOFError verərdi).
-        try:
-            input("\nÇıxmaq üçün Enter sıxın...")
-        except EOFError:
-            pass
-        return
->>>>>>> 544081cc86190b19ca64abac507e2ef927a85753
 
     driver = None
     attempt = 1
@@ -701,16 +659,7 @@ def main():
     except KeyboardInterrupt:
         print("\n[-] Sistem dayandırıldı.")
     finally:
-<<<<<<< HEAD
         safe_quit(driver)
-=======
-        # QEYD: input()-ə qaytarma — serverdə brauzeri açıq saxlamaq üçün wait_or_pause lazımdır.
-        wait_or_pause("\nKeşfiyyatçı brauzerini tam bağlamaq üçün Enter sıxın...")
-        try:
-            driver.quit()
-        except:
-            pass
->>>>>>> 544081cc86190b19ca64abac507e2ef927a85753
 
 
 if __name__ == "__main__":
